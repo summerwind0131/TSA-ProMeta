@@ -17,7 +17,7 @@ source /mnt/hpc/home/lihan/miniconda3/etc/profile.d/conda.sh
 conda activate fengyuan
 set -u
 
-CODE=/mnt/hpc/home/lihan/fengyuan/official_ProMeta/ProMeta
+CODE=/mnt/hpc/home/lihan/fengyuan/TSA-ProMeta/ProMeta
 OUTPUT_ROOT="${OUTPUT_ROOT:-/mnt/hpc/home/lihan/fengyuan/task_prometa_v3_screen}"
 EPOCHS="${EPOCHS:-100}"
 
@@ -54,7 +54,7 @@ echo "Group fraction bounds=${MIN_GROUP_FRACTIONS[$VARIANT_ID]}..${MAX_GROUP_FRA
 python main.py \
   --data_dir /mnt/hpc/home/lihan/fengyuan/ProMeta/data/out \
   --proteomics_csv /mnt/hpc/home/lihan/fengyuan/ProMeta/data/preprocessed_proteomics_data.csv \
-  --cpdb_path /mnt/hpc/home/lihan/fengyuan/official_ProMeta/resource/CPDB_pathways_genes.tab \
+  --cpdb_path /mnt/hpc/home/lihan/fengyuan/TSA-ProMeta/resource/CPDB_pathways_genes.tab \
   --output_dir "$OUT" \
   --gpu_id 0 \
   --random_seed "$SEED" \

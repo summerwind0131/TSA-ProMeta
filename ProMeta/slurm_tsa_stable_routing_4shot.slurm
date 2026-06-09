@@ -17,9 +17,15 @@ source /mnt/hpc/home/lihan/miniconda3/etc/profile.d/conda.sh
 conda activate fengyuan
 set -u
 
+<<<<<<< Updated upstream
 CODE=/mnt/hpc/home/lihan/fengyuan/TSA-ProMeta/ProMeta
+=======
+CODE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+>>>>>>> Stashed changes
 OUTPUT_ROOT="${OUTPUT_ROOT:-/mnt/hpc/home/lihan/fengyuan/task_prometa_v3_screen}"
 EPOCHS="${EPOCHS:-100}"
+
+python "$CODE/require_rtx3090.py"
 
 SEEDS=(42 43 44)
 VARIANTS=(

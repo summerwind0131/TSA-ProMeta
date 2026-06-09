@@ -152,6 +152,54 @@ For the strict 4-shot comparison use
 - `F_epoch`: one frozen assignment map per epoch.
 - `H_stable`: epoch routing plus 5% switch hysteresis and 5%-50% group bounds.
 
+### Diagnose TSA clustering
+
+`ProMeta/analyze_tsa_clustering.py` rebuilds every training disease task vector
+from the frozen selector stored in each TSA checkpoint. It reports:
+
+- silhouette, Calinski-Harabasz, Davies-Bouldin, and explained between-cluster
+  variance;
+- a shuffled-label silhouette null distribution;
+- cluster-size balance and entropy;
+- agreement among the stored initial K-means labels, a scikit-learn global-L2
+  refit, a block-balanced refit, and the nearest trained group initialization;
+- classifier-only and gate-only geometry;
+- cross-seed ARI/NMI stability;
+- PCA and cluster-size plots plus per-disease assignments.
+
+The block-balanced embedding scales every parameter block by
+`sqrt(block_weight / block_dimension)`. Euclidean distance in this embedding is
+therefore exactly the configured block-mean distance. This comparison detects
+whether the original global-L2 K-means initialization is misaligned with the
+later block-mean routing rule.
+
+On Slurm, set a checkpoint glob and submit the analysis through the RTX 3090
+wrapper:
+
+```bash
+cd /mnt/hpc/home/lihan/fengyuan/TSA-ProMeta/ProMeta
+
+export CHECKPOINT_GLOB='/mnt/hpc/home/lihan/fengyuan/task_prometa_v4_strict/H_stable/checkpoints/support_4/TSA-ProMeta_best_seed*.pth'
+export OUTPUT_DIR=/mnt/hpc/home/lihan/fengyuan/task_prometa_cluster_analysis/H_stable
+
+RTX3090_NODELIST=gpu02 \
+  bash submit_rtx3090.sh slurm_analyze_tsa_clustering.slurm
+```
+
+Only include nodes whose GPU model has been confirmed as RTX 3090. If the
+cluster exposes a node feature such as `rtx3090`, prefer:
+
+```bash
+RTX3090_CONSTRAINT=rtx3090 \
+  bash submit_rtx3090.sh slurm_analyze_tsa_clustering.slurm
+```
+
+The submit wrapper prevents an unrestricted submission. Every GPU Slurm script
+in this repository also runs `require_rtx3090.py` after allocation and exits
+before loading data or training if any visible GPU is not an RTX 3090. Use the
+wrapper for the scheduling restriction; the runtime guard is the final safety
+check.
+
 ## Citation
 If you find this code or our paper useful for your research, please cite:
 ```

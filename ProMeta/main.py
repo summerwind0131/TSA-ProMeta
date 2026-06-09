@@ -351,6 +351,7 @@ def build_model_checkpoint(model, config, args):
             else None
         ),
         "tsa_config": {
+            "random_seed": getattr(args, "random_seed", None),
             "num_task_groups": config.num_task_groups,
             "tsa_param_keys": config.tsa_param_keys,
             "tsa_selector_steps": config.tsa_selector_steps,

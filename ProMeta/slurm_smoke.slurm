@@ -15,6 +15,9 @@ set -euo pipefail
 source /mnt/hpc/home/lihan/miniconda3/etc/profile.d/conda.sh
 conda activate ProMeta
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python "$SCRIPT_DIR/require_rtx3090.py"
+
 cd /mnt/hpc/home/lihan/fengyuan/task_prometa_code/proMeta/official_ProMeta/ProMeta
 
 export DATA_DIR=/mnt/hpc/home/lihan/fengyuan/ProMeta/data/out

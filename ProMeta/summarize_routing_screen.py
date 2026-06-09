@@ -52,10 +52,46 @@ def build_run_rows(runs):
     for path, data in runs:
         history = data.get("history") or {}
         val_aurocs = history.get("val_auroc") or []
-        if not val_aurocs:
+        epoch0_val = history.get("epoch0_val_metrics") or {}
+        epoch0_test = history.get("epoch0_test_metrics") or {}
+        epoch1_test = history.get("epoch1_test_metrics") or {}
+        if not val_aurocs and not epoch0_val:
             continue
-        best_index = max(range(len(val_aurocs)), key=val_aurocs.__getitem__)
-        drift = value_at(history, "tsa_group_drift", best_index, []) or []
+
+        recorded_best_epoch = history.get("best_epoch")
+        if recorded_best_epoch is None:
+            trained_best_index = max(
+                range(len(val_aurocs)),
+                key=val_aurocs.__getitem__,
+            )
+            best_epoch = trained_best_index + 1
+        else:
+            best_epoch = int(recorded_best_epoch)
+
+        if best_epoch == 0:
+            best_index = None
+            best_val_auroc = epoch0_val.get("auroc")
+            best_val_auprc = epoch0_val.get("auprc")
+            drift = []
+        else:
+            best_index = best_epoch - 1
+            best_val_auroc = value_at(
+                history,
+                "val_auroc",
+                best_index,
+            )
+            best_val_auprc = value_at(
+                history,
+                "val_auprc",
+                best_index,
+            )
+            drift = value_at(
+                history,
+                "tsa_group_drift",
+                best_index,
+                [],
+            ) or []
+
         config = data.get("config") or {}
         metrics = data.get("summary_metrics") or {}
 
@@ -63,53 +99,88 @@ def build_run_rows(runs):
             "variant": data.get("experiment_name"),
             "support_size": data.get("support_size"),
             "seed": data.get("seed"),
-            "best_epoch": best_index + 1,
+            "best_epoch": best_epoch,
             "epochs_ran": len(val_aurocs),
-            "best_val_auroc": val_aurocs[best_index],
-            "val_auprc_at_best": value_at(
-                history,
-                "val_auprc",
-                best_index,
-            ),
+            "epoch0_val_auroc": epoch0_val.get("auroc"),
+            "epoch0_val_auprc": epoch0_val.get("auprc"),
+            "epoch0_test_auroc": epoch0_test.get("auroc"),
+            "epoch0_test_auprc": epoch0_test.get("auprc"),
+            "epoch1_val_auroc": value_at(history, "val_auroc", 0),
+            "epoch1_val_auprc": value_at(history, "val_auprc", 0),
+            "epoch1_test_auroc": epoch1_test.get("auroc"),
+            "epoch1_test_auprc": epoch1_test.get("auprc"),
+            "best_val_auroc": best_val_auroc,
+            "val_auprc_at_best": best_val_auprc,
             "test_auroc": metrics.get("auroc"),
             "test_auprc": metrics.get("auprc"),
             "group_usage": json.dumps(
-                value_at(history, "tsa_group_usage", best_index, []),
+                (
+                    value_at(history, "tsa_group_usage", best_index, [])
+                    if best_index is not None
+                    else history.get("tsa_cluster_counts", [])
+                ),
                 separators=(",", ":"),
             ),
             "switch_rate": value_at(
                 history,
                 "tsa_group_switch_rate",
                 best_index,
-            ),
+            ) if best_index is not None else None,
             "hysteresis_retention_rate": value_at(
                 history,
                 "tsa_hysteresis_retention_rate",
                 best_index,
-            ),
+            ) if best_index is not None else None,
             "forced_rebalance_rate": value_at(
                 history,
                 "tsa_forced_rebalance_rate",
                 best_index,
-            ),
+            ) if best_index is not None else None,
             "mean_margin": value_at(
                 history,
                 "tsa_mean_assignment_margin",
                 best_index,
-            ),
+            ) if best_index is not None else None,
             "max_group_drift": max(drift) if drift else None,
             "mean_block_distances": json.dumps(
-                value_at(history, "tsa_mean_block_distances", best_index, {}),
+                (
+                    value_at(
+                        history,
+                        "tsa_mean_block_distances",
+                        best_index,
+                        {},
+                    )
+                    if best_index is not None
+                    else {}
+                ),
                 separators=(",", ":"),
                 sort_keys=True,
             ),
             "block_nearest_agreement": json.dumps(
-                value_at(history, "tsa_block_nearest_agreement", best_index, {}),
+                (
+                    value_at(
+                        history,
+                        "tsa_block_nearest_agreement",
+                        best_index,
+                        {},
+                    )
+                    if best_index is not None
+                    else {}
+                ),
                 separators=(",", ":"),
                 sort_keys=True,
             ),
             "block_task_variance": json.dumps(
-                value_at(history, "tsa_block_task_variance", best_index, {}),
+                (
+                    value_at(
+                        history,
+                        "tsa_block_task_variance",
+                        best_index,
+                        {},
+                    )
+                    if best_index is not None
+                    else {}
+                ),
                 separators=(",", ":"),
                 sort_keys=True,
             ),
@@ -138,6 +209,10 @@ def mean_or_none(rows, key):
     return statistics.mean(values) if values else None
 
 
+def format_metric(value):
+    return "NA" if value is None else f"{value:.4f}"
+
+
 def build_variant_rows(run_rows):
     grouped = defaultdict(list)
     for row in run_rows:
@@ -155,6 +230,14 @@ def build_variant_rows(run_rows):
                 statistics.stdev(val_values) if len(val_values) > 1 else 0.0
             ),
             "mean_val_auprc_at_best": mean_or_none(rows, "val_auprc_at_best"),
+            "mean_epoch0_val_auroc": mean_or_none(rows, "epoch0_val_auroc"),
+            "mean_epoch0_val_auprc": mean_or_none(rows, "epoch0_val_auprc"),
+            "mean_epoch0_test_auroc": mean_or_none(rows, "epoch0_test_auroc"),
+            "mean_epoch0_test_auprc": mean_or_none(rows, "epoch0_test_auprc"),
+            "mean_epoch1_val_auroc": mean_or_none(rows, "epoch1_val_auroc"),
+            "mean_epoch1_val_auprc": mean_or_none(rows, "epoch1_val_auprc"),
+            "mean_epoch1_test_auroc": mean_or_none(rows, "epoch1_test_auroc"),
+            "mean_epoch1_test_auprc": mean_or_none(rows, "epoch1_test_auprc"),
             "mean_test_auroc": mean_or_none(rows, "test_auroc"),
             "mean_test_auprc": mean_or_none(rows, "test_auprc"),
             "mean_switch_rate": mean_or_none(rows, "switch_rate"),
@@ -203,6 +286,8 @@ def main():
     for row in variant_rows:
         print(
             row["variant"],
+            f"Epoch0={format_metric(row['mean_epoch0_val_auroc'])}",
+            f"Epoch1={format_metric(row['mean_epoch1_val_auroc'])}",
             f"Val AUROC={row['mean_best_val_auroc']:.4f}",
             f"SD={row['std_best_val_auroc']:.4f}",
             f"Val AUPRC={row['mean_val_auprc_at_best']:.4f}",

@@ -1,6 +1,8 @@
 import os
 import math
 import pickle as pkl
+import random
+from contextlib import contextmanager
 import numpy as np
 import pandas as pd
 import torch
@@ -11,6 +13,48 @@ from config import parse_args
 from utils import set_seed, compute_task_metrics, save_results
 from dataset import generate_pathway_mask, MetaDataset
 from model import ProphetBioGateModel, FocalLoss
+
+
+def capture_random_state(generators=None):
+    generators = generators or {}
+    state = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state().clone(),
+        "torch_cuda": (
+            [value.clone() for value in torch.cuda.get_rng_state_all()]
+            if torch.cuda.is_available()
+            else None
+        ),
+        "generators": {
+            name: generator.get_state().clone()
+            for name, generator in generators.items()
+            if generator is not None
+        },
+    }
+    return state
+
+
+def restore_random_state(state, generators=None):
+    generators = generators or {}
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch_cpu"])
+    if state["torch_cuda"] is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state["torch_cuda"])
+    for name, generator_state in state["generators"].items():
+        generator = generators.get(name)
+        if generator is not None:
+            generator.set_state(generator_state)
+
+
+@contextmanager
+def isolated_random_state(generators=None):
+    state = capture_random_state(generators)
+    try:
+        yield
+    finally:
+        restore_random_state(state, generators)
 
 
 def is_adaptive_param_name(name, config):
@@ -614,10 +658,13 @@ def get_group_count_bounds(num_tasks, num_groups, min_fraction, max_fraction):
 
 def build_epoch_assignment_map(model, train_loader, config, device,
                                previous_assignments):
+    routing_generator = torch.Generator()
+    routing_generator.manual_seed(0)
     routing_loader = DataLoader(
         train_loader.dataset,
         batch_size=train_loader.batch_size,
         shuffle=False,
+        generator=routing_generator,
     )
     criterion = FocalLoss(alpha=0.5, gamma=config.focal_gamma)
     prototypes = get_tsa_assignment_prototypes(model, config).detach().clone()
@@ -923,6 +970,12 @@ def evaluate_v2(model, task_loader, config, device, mode="Valid"):
     return summary, task_results
 
 
+def evaluate_without_rng_side_effects(model, task_loader, config, device, mode,
+                                      generators=None):
+    with isolated_random_state(generators):
+        return evaluate_v2(model, task_loader, config, device, mode=mode)
+
+
 def compute_group_drifts(model):
     if model.tsa_initial_group_vectors is None:
         return []
@@ -1052,6 +1105,18 @@ def main():
     pathway_mask, unknown_indices = generate_pathway_mask(protein_names, args.cpdb_path)
     pathway_mask = pathway_mask.to(device)
 
+    train_generator = torch.Generator()
+    train_generator.manual_seed(args.random_seed)
+    valid_generator = torch.Generator()
+    valid_generator.manual_seed(args.random_seed + 10_000)
+    test_generator = torch.Generator()
+    test_generator.manual_seed(args.random_seed + 20_000)
+    loader_generators = {
+        "train": train_generator,
+        "valid": valid_generator,
+        "test": test_generator,
+    }
+
     train_loader = DataLoader(
         MetaDataset(
             proteins,
@@ -1066,6 +1131,7 @@ def main():
         ),
         batch_size=args.batch_size,
         shuffle=True,
+        generator=train_generator,
     )
     valid_loader = DataLoader(
         MetaDataset(
@@ -1081,6 +1147,7 @@ def main():
         ),
         batch_size=1,
         shuffle=False,
+        generator=valid_generator,
     )
     test_loader = DataLoader(
         MetaDataset(
@@ -1096,18 +1163,25 @@ def main():
         ),
         batch_size=1,
         shuffle=False,
+        generator=test_generator,
     )
 
     model = ProphetBioGateModel(proteins.shape[1], config, pathway_mask, unknown_indices).to(device)
-    prepare_tsa_model(model, train_loader, config, args, device)
+    with isolated_random_state(loader_generators):
+        prepare_tsa_model(model, train_loader, config, args, device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.outer_lr)
 
     best_auroc = 0.0
+    best_epoch = None
     epochs_without_improvement = 0
     history = {
         "train_loss": [],
         "val_auroc": [],
         "val_auprc": [],
+        "epoch0_val_metrics": None,
+        "epoch0_test_metrics": None,
+        "epoch1_test_metrics": None,
+        "best_epoch": None,
         "early_stopped_epoch": None,
     }
     if config.tsa_enable:
@@ -1141,22 +1215,55 @@ def main():
     os.makedirs(save_dir, exist_ok=True)
     best_model_path = os.path.join(save_dir, f"{mode_name}_best_seed{args.random_seed}.pth")
 
+    if config.tsa_enable:
+        print("\n--- Epoch 0 Evaluation (K-means initialization, no query-loss training) ---")
+        epoch0_val_summary, _ = evaluate_without_rng_side_effects(
+            model,
+            valid_loader,
+            config,
+            device,
+            mode="Epoch 0 Valid",
+            generators=loader_generators,
+        )
+        epoch0_test_summary, _ = evaluate_without_rng_side_effects(
+            model,
+            test_loader,
+            config,
+            device,
+            mode="Epoch 0 Test",
+            generators=loader_generators,
+        )
+        history["epoch0_val_metrics"] = epoch0_val_summary
+        history["epoch0_test_metrics"] = epoch0_test_summary
+        best_auroc = epoch0_val_summary["auroc"]
+        best_epoch = 0
+        history["best_epoch"] = best_epoch
+        torch.save(build_model_checkpoint(model, config, args), best_model_path)
+        print(
+            f"[Epoch 0] Val AUROC: {epoch0_val_summary['auroc']:.4f} | "
+            f"Val AUPRC: {epoch0_val_summary['auprc']:.4f} | "
+            f"Test AUROC: {epoch0_test_summary['auroc']:.4f} | "
+            f"Test AUPRC: {epoch0_test_summary['auprc']:.4f}"
+        )
+        print(f"[Info] Epoch 0 model saved as initial best checkpoint.")
+
     for epoch in range(config.epochs):
         epoch_assignment_map = None
         routing_details = None
         routing_diagnostics = {}
         if config.tsa_enable and config.tsa_routing_schedule == "epoch_snapshot":
-            (
-                epoch_assignment_map,
-                routing_details,
-                routing_diagnostics,
-            ) = build_epoch_assignment_map(
-                model,
-                train_loader,
-                config,
-                device,
-                previous_epoch_assignments,
-            )
+            with isolated_random_state(loader_generators):
+                (
+                    epoch_assignment_map,
+                    routing_details,
+                    routing_diagnostics,
+                ) = build_epoch_assignment_map(
+                    model,
+                    train_loader,
+                    config,
+                    device,
+                    previous_epoch_assignments,
+                )
 
         model.train()
         l_sum, focal_sum, train_probs_all, train_labels_all = 0.0, 0.0, [], []
@@ -1178,11 +1285,33 @@ def main():
             epoch_assignments.extend(groups)
 
         train_metrics = compute_task_metrics(torch.cat(train_probs_all), torch.cat(train_labels_all)) or {"auroc": 0.0}
-        val_summary, _ = evaluate_v2(model, valid_loader, config, device)
+        val_summary, _ = evaluate_without_rng_side_effects(
+            model,
+            valid_loader,
+            config,
+            device,
+            mode="Valid",
+            generators=loader_generators,
+        )
 
         history["train_loss"].append(l_sum / len(train_loader))
         history["val_auroc"].append(val_summary["auroc"])
         history["val_auprc"].append(val_summary["auprc"])
+
+        if config.tsa_enable and epoch == 0:
+            epoch1_test_summary, _ = evaluate_without_rng_side_effects(
+                model,
+                test_loader,
+                config,
+                device,
+                mode="Epoch 1 Test",
+                generators=loader_generators,
+            )
+            history["epoch1_test_metrics"] = epoch1_test_summary
+            print(
+                f"[Epoch 1] Test AUROC: {epoch1_test_summary['auroc']:.4f} | "
+                f"Test AUPRC: {epoch1_test_summary['auprc']:.4f}"
+            )
 
         group_msg = ""
         if config.tsa_enable:
@@ -1247,9 +1376,14 @@ def main():
 
         if val_summary["auroc"] > best_auroc:
             best_auroc = val_summary["auroc"]
+            best_epoch = epoch + 1
+            history["best_epoch"] = best_epoch
             epochs_without_improvement = 0
             torch.save(build_model_checkpoint(model, config, args), best_model_path)
-            print(f"[Info] New Best Model Saved (AUROC: {best_auroc:.4f})")
+            print(
+                f"[Info] New Best Model Saved "
+                f"(Epoch: {best_epoch}, AUROC: {best_auroc:.4f})"
+            )
         else:
             epochs_without_improvement += 1
             if config.patience > 0 and epochs_without_improvement >= config.patience:
@@ -1263,8 +1397,18 @@ def main():
     print("\n--- Testing ---")
     if os.path.exists(best_model_path):
         load_model_checkpoint(model, best_model_path, device, strict=True, load_metadata=True)
-    test_summary, test_results = evaluate_v2(model, test_loader, config, device, mode="Test")
-    print(f"[Result] Final Test AUROC: {test_summary['auroc']:.4f}")
+    test_summary, test_results = evaluate_without_rng_side_effects(
+        model,
+        test_loader,
+        config,
+        device,
+        mode="Test",
+        generators=loader_generators,
+    )
+    print(
+        f"[Result] Best Epoch: {best_epoch} | "
+        f"Final Test AUROC: {test_summary['auroc']:.4f}"
+    )
     save_results(test_summary, test_results, args, mode_name, args.output_dir, history)
 
 

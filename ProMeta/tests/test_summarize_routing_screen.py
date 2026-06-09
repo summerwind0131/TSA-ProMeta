@@ -76,6 +76,44 @@ class RoutingSummaryTests(unittest.TestCase):
         self.assertEqual(len(variant_rows), 1)
         self.assertAlmostEqual(variant_rows[0]["mean_test_auroc"], 0.71)
 
+    def test_routing_summary_can_select_epoch_zero(self):
+        data = {
+            "experiment_name": "F_epoch",
+            "support_size": 4,
+            "seed": 42,
+            "config": {},
+            "summary_metrics": {"auroc": 0.73, "auprc": 0.53},
+            "history": {
+                "best_epoch": 0,
+                "epoch0_val_metrics": {"auroc": 0.74, "auprc": 0.54},
+                "epoch0_test_metrics": {"auroc": 0.73, "auprc": 0.53},
+                "epoch1_test_metrics": {"auroc": 0.70, "auprc": 0.50},
+                "val_auroc": [0.71, 0.69],
+                "val_auprc": [0.51, 0.49],
+                "tsa_cluster_counts": [3, 2],
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result_dir = (
+                Path(tmpdir)
+                / "F_epoch"
+                / "benchmark_results"
+                / "support_4"
+            )
+            result_dir.mkdir(parents=True)
+            (result_dir / "TSA-ProMeta_seed42_fixture.json").write_text(
+                json.dumps(data),
+                encoding="utf-8",
+            )
+            run_rows = build_run_rows(latest_run_files(tmpdir))
+
+        self.assertEqual(run_rows[0]["best_epoch"], 0)
+        self.assertAlmostEqual(run_rows[0]["best_val_auroc"], 0.74)
+        self.assertAlmostEqual(run_rows[0]["epoch1_val_auroc"], 0.71)
+        self.assertAlmostEqual(run_rows[0]["epoch1_test_auroc"], 0.70)
+        self.assertEqual(run_rows[0]["group_usage"], "[3,2]")
+
 
 if __name__ == "__main__":
     unittest.main()

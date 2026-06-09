@@ -2,9 +2,12 @@ import sys
 import tempfile
 import types
 import unittest
+import random
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
@@ -24,13 +27,17 @@ from main import (  # noqa: E402
     assign_tsa_group_params_from_vectors,
     build_epoch_assignment_map,
     build_model_checkpoint,
+    capture_random_state,
     capture_selector_snapshot,
     compute_tsa_distances,
     enforce_group_size_constraints,
     estimate_task_vector,
+    evaluate_without_rng_side_effects,
     flatten_current_group_params,
     get_param_slices,
     load_model_checkpoint,
+    isolated_random_state,
+    restore_random_state,
     select_tsa_group,
     summarize_epoch_assignments,
     train_step_v2,
@@ -417,6 +424,74 @@ class TsaV2Tests(unittest.TestCase):
         self.assertEqual(diagnostics["min_group_count"], 1)
         self.assertEqual(diagnostics["max_group_count"], 1)
         self.assertIn("classifier", diagnostics["block_task_variance"])
+
+    def test_isolated_random_state_restores_all_generators(self):
+        random.seed(11)
+        np.random.seed(12)
+        torch.manual_seed(13)
+        loader_generator = torch.Generator()
+        loader_generator.manual_seed(14)
+        generators = {"train": loader_generator}
+
+        initial = capture_random_state(generators)
+        expected = (
+            random.random(),
+            float(np.random.rand()),
+            float(torch.rand(1)),
+            float(torch.rand(1, generator=loader_generator)),
+        )
+        restore_random_state(initial, generators)
+
+        with isolated_random_state(generators):
+            random.random()
+            np.random.rand()
+            torch.rand(4)
+            torch.rand(4, generator=loader_generator)
+
+        actual = (
+            random.random(),
+            float(np.random.rand()),
+            float(torch.rand(1)),
+            float(torch.rand(1, generator=loader_generator)),
+        )
+        self.assertEqual(expected, actual)
+
+    def test_diagnostic_evaluation_preserves_loader_generator(self):
+        config = make_config()
+        model = make_model(config)
+        support_x, support_y = make_support()
+        initialize_assignment_metadata(model, config, support_x, support_y)
+        loader_generator = torch.Generator()
+        loader_generator.manual_seed(99)
+        loader = DataLoader(
+            TinyTaskDataset(),
+            batch_size=1,
+            shuffle=False,
+            generator=loader_generator,
+        )
+        before = loader_generator.get_state().clone()
+
+        with patch(
+            "main.compute_task_metrics",
+            return_value={
+                "auroc": 0.5,
+                "auprc": 0.5,
+                "f1": 0.5,
+                "accuracy": 0.5,
+            },
+        ):
+            summary, task_results = evaluate_without_rng_side_effects(
+                model,
+                loader,
+                config,
+                torch.device("cpu"),
+                mode="Diagnostic",
+                generators={"test": loader_generator},
+            )
+
+        self.assertTrue(torch.equal(before, loader_generator.get_state()))
+        self.assertIn("auroc", summary)
+        self.assertEqual(len(task_results), 2)
 
 
 if __name__ == "__main__":

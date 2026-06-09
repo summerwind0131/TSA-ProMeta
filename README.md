@@ -134,6 +134,24 @@ bounds. Summarize completed runs with:
 python summarize_routing_screen.py --root /path/to/task_prometa_v3_screen
 ```
 
+Every TSA run now evaluates three milestones:
+
+- Epoch 0: K-means and group initialization only, before query-loss training.
+- Epoch 1: after one complete meta-training epoch.
+- Best epoch: selected only by validation AUROC; Epoch 0 may be selected.
+
+Epoch 0 and Epoch 1 validation/test metrics are stored in the result JSON
+history. Diagnostic evaluation and epoch-level routing run inside an isolated
+random-state context that restores Python, NumPy, PyTorch CPU, CUDA, and
+explicit DataLoader generator states.
+
+For the strict 4-shot comparison use
+`ProMeta/slurm_tsa_strict_4shot.slurm`. It runs three seeds for:
+
+- `D_control`: online current-group routing.
+- `F_epoch`: one frozen assignment map per epoch.
+- `H_stable`: epoch routing plus 5% switch hysteresis and 5%-50% group bounds.
+
 ## Citation
 If you find this code or our paper useful for your research, please cite:
 ```

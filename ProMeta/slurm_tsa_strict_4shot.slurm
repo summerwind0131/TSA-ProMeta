@@ -17,9 +17,14 @@ source /mnt/hpc/home/lihan/miniconda3/etc/profile.d/conda.sh
 conda activate fengyuan
 set -u
 
-CODE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CODE="${CODE:-/mnt/hpc/home/lihan/fengyuan/TSA-ProMeta/ProMeta}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/mnt/hpc/home/lihan/fengyuan/task_prometa_v4_strict}"
 EPOCHS="${EPOCHS:-100}"
+
+test -f "$CODE/require_rtx3090.py" || {
+  echo "Missing GPU guard: $CODE/require_rtx3090.py" >&2
+  exit 1
+}
 
 python "$CODE/require_rtx3090.py"
 

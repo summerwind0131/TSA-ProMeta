@@ -91,6 +91,7 @@ def save_results(summary, task_results, args, model_name, output_dir, history=No
     data = {
         "model": model_name, 
         "experiment_name": getattr(args, "experiment_name", "ProMeta"),
+        "encoder_type": getattr(args, "encoder_type", "transformer"),
         "support_size": args.support_size,
         "max_support_size": getattr(args, "max_support_size", None),
         "seed": args.random_seed,

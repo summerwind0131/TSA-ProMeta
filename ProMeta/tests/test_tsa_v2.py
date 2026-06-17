@@ -23,6 +23,7 @@ except ModuleNotFoundError:
     sys.modules["torchmetrics"] = torchmetrics_stub
 
 from main import (  # noqa: E402
+    adapt_fast_weights,
     apply_switch_hysteresis,
     assign_tsa_group_params_from_vectors,
     build_epoch_assignment_map,
@@ -35,7 +36,9 @@ from main import (  # noqa: E402
     evaluate_without_rng_side_effects,
     flatten_current_group_params,
     get_param_slices,
+    get_adaptive_param_names,
     load_model_checkpoint,
+    make_fast_weights,
     isolated_random_state,
     restore_random_state,
     select_tsa_group,
@@ -45,12 +48,14 @@ from main import (  # noqa: E402
 from model import FocalLoss, ProphetBioGateModel  # noqa: E402
 
 
-def make_config():
-    return SimpleNamespace(
+def make_config(**overrides):
+    values = dict(
         tsa_enable=True,
         tsa_param_keys=["classifier", "tokenizer.gate_logits"],
         num_task_groups=2,
+        encoder_type="transformer",
         embed_dim=4,
+        hidden_dim=8,
         num_heads=2,
         num_layers=1,
         dropout_rate=0.0,
@@ -72,6 +77,8 @@ def make_config():
         tsa_min_group_fraction=0.05,
         tsa_max_group_fraction=0.50,
     )
+    values.update(overrides)
+    return SimpleNamespace(**values)
 
 
 def make_model(config=None):
@@ -98,6 +105,14 @@ def make_support():
     support_x = torch.randn(4, 6)
     support_y = torch.tensor([1.0, 1.0, 0.0, 0.0])
     return support_x, support_y
+
+
+def base_param_dict(model):
+    return {
+        name: param
+        for name, param in model.named_parameters()
+        if not name.startswith("alphas.") and not name.startswith("tsa_group_params.")
+    }
 
 
 def initialize_assignment_metadata(model, config, support_x, support_y):
@@ -147,6 +162,132 @@ class TinyTaskDataset(Dataset):
 
 
 class TsaV2Tests(unittest.TestCase):
+    def test_mlp_encoder_supports_2d_and_3d_inputs(self):
+        config = make_config(encoder_type="mlp")
+        model = make_model(config)
+        params = base_param_dict(model)
+
+        logits_2d, _ = model.functional_forward(torch.randn(5, 6), params)
+        logits_3d, _ = model.functional_forward(torch.randn(2, 5, 6), params)
+
+        self.assertEqual(tuple(logits_2d.shape), (5, 1))
+        self.assertEqual(tuple(logits_3d.shape), (2, 5, 1))
+        self.assertFalse(hasattr(model, "cls_token"))
+        self.assertFalse(hasattr(model, "tf_layers"))
+        self.assertTrue(hasattr(model, "mlp_encoder"))
+
+    def test_mlp_encoder_params_enter_alphas_and_can_adapt(self):
+        config = make_config(
+            encoder_type="mlp",
+            tsa_param_keys=[
+                "mlp_encoder",
+                "classifier",
+                "tokenizer.gate_logits",
+            ],
+        )
+        model = make_model(config)
+        support_x, support_y = make_support()
+        criterion = FocalLoss(alpha=0.5, gamma=config.focal_gamma)
+        fast_weights = make_fast_weights(model, config, detach=True)
+        before = fast_weights["mlp_encoder.token_linear1.weight"].detach().clone()
+        grad_keys = get_adaptive_param_names(model, config)
+
+        updated = adapt_fast_weights(
+            model,
+            support_x,
+            support_y,
+            fast_weights,
+            model.alphas,
+            grad_keys,
+            criterion,
+            config,
+            steps=1,
+            create_graph=False,
+        )
+
+        self.assertIn("mlp_encoder_token_linear1_weight", model.alphas)
+        self.assertIn("mlp_encoder_feature_linear2_bias", model.alphas)
+        self.assertFalse(torch.allclose(
+            before,
+            updated["mlp_encoder.token_linear1.weight"],
+        ))
+
+    def test_mlp_checkpoint_round_trip_preserves_outputs(self):
+        config = make_config(encoder_type="mlp", tsa_enable=False)
+        model = make_model(config)
+        model.eval()
+        x = torch.randn(3, 6)
+        expected, _ = model.functional_forward(x, base_param_dict(model))
+        args = SimpleNamespace(
+            support_size=4,
+            max_support_size=32,
+            random_seed=42,
+        )
+        checkpoint = build_model_checkpoint(model, config, args)
+        restored = make_model(config)
+        restored.eval()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "mlp.pt"
+            torch.save(checkpoint, path)
+            load_model_checkpoint(
+                restored,
+                str(path),
+                torch.device("cpu"),
+                strict=True,
+                load_metadata=True,
+            )
+
+        actual, _ = restored.functional_forward(x, base_param_dict(restored))
+        self.assertTrue(torch.allclose(expected, actual, atol=1e-7))
+
+    def test_transformer_checkpoint_cannot_warmup_mlp(self):
+        transformer_config = make_config(tsa_enable=False)
+        transformer = make_model(transformer_config)
+        args = SimpleNamespace(
+            support_size=4,
+            max_support_size=32,
+            random_seed=42,
+        )
+        checkpoint = build_model_checkpoint(transformer, transformer_config, args)
+        mlp_config = make_config(encoder_type="mlp")
+        mlp_model = make_model(mlp_config)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "transformer.pt"
+            torch.save(checkpoint, path)
+            with self.assertRaisesRegex(ValueError, "encoder_type=transformer"):
+                load_model_checkpoint(
+                    mlp_model,
+                    str(path),
+                    torch.device("cpu"),
+                    strict=False,
+                    load_metadata=False,
+                )
+
+    def test_tsa_task_vector_works_with_mlp_encoder(self):
+        config = make_config(encoder_type="mlp")
+        model = make_model(config)
+        support_x, support_y = make_support()
+        criterion = FocalLoss(alpha=0.5, gamma=config.focal_gamma)
+        capture_selector_snapshot(model)
+
+        vector = estimate_task_vector(
+            model,
+            support_x,
+            support_y,
+            config,
+            criterion,
+            torch.device("cpu"),
+        )
+
+        expected_size = (
+            model.classifier.weight.numel()
+            + model.classifier.bias.numel()
+            + model.tokenizer.gate_logits.numel()
+        )
+        self.assertEqual(vector.numel(), expected_size)
+
     def test_frozen_selector_is_stable_while_live_selector_moves(self):
         config = make_config()
         model = make_model(config)

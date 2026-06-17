@@ -124,6 +124,7 @@ def checkpoint_label(path):
 
 def config_from_checkpoint(checkpoint, args):
     saved = checkpoint.get("tsa_config") or {}
+    model_config = checkpoint.get("model_config") or {}
     centroids = checkpoint.get("tsa_centroids")
     inferred_groups = int(centroids.shape[0]) if torch.is_tensor(centroids) else 1
     selector_source = saved.get("tsa_selector_source", "frozen_warmup")
@@ -149,6 +150,11 @@ def config_from_checkpoint(checkpoint, args):
         patience=0,
         dropout=0.5,
         experiment_name="TSA clustering analysis",
+        encoder_type=(
+            model_config.get("encoder_type")
+            or saved.get("encoder_type")
+            or "transformer"
+        ),
         l1_lambda=1e-3,
         tsa_enable=True,
         num_task_groups=int(saved.get("num_task_groups", inferred_groups)),
@@ -294,6 +300,7 @@ def rebuild_task_vectors(
     return {
         "seed": seed,
         "config": config,
+        "encoder_type": config.encoder_type,
         "support_size": support_size,
         "max_support_size": max_support_size,
         "terms": terms,
@@ -735,6 +742,7 @@ def analyze_checkpoint(rebuilt, args, output_root):
         "checkpoint": rebuilt["checkpoint"],
         "label": rebuilt["label"],
         "seed": seed,
+        "encoder_type": rebuilt["encoder_type"],
         "support_size": rebuilt["support_size"],
         "max_support_size": rebuilt["max_support_size"],
         "task_count": len(terms),
@@ -758,6 +766,7 @@ def analyze_checkpoint(rebuilt, args, output_root):
         json.dump(summary, handle, indent=2)
     return {
         "seed": seed,
+        "encoder_type": rebuilt["encoder_type"],
         "label": rebuilt["label"],
         "terms": terms,
         "assignments": assignments,
@@ -796,8 +805,10 @@ def cross_seed_rows(results):
                 rows.append({
                     "left_label": left["label"],
                     "left_seed": left["seed"],
+                    "left_encoder_type": left["encoder_type"],
                     "right_label": right["label"],
                     "right_seed": right["seed"],
+                    "right_encoder_type": right["encoder_type"],
                     "assignment": assignment,
                     "common_tasks": len(common_terms),
                     "ari": float(
@@ -903,6 +914,7 @@ def main():
             all_metric_rows.append({
                 "label": result["label"],
                 "seed": result["seed"],
+                "encoder_type": result["encoder_type"],
                 **row,
             })
         if device.type == "cuda":

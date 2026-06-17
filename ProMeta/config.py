@@ -23,6 +23,7 @@ class Config:
         self.embed_dim = 64
         self.num_heads = 2
         self.num_layers = 2
+        self.encoder_type = args.encoder_type
         
         # Loss parameters
         self.focal_alpha = 0.75
@@ -88,6 +89,13 @@ def parse_args():
     parser.add_argument("--inner_lr", type=float, default=0.005, help="Inner loop learning rate")
     parser.add_argument("--dropout", type=float, default=0.5, help="Dropout rate")
     parser.add_argument("--l1_lambda", type=float, default=1e-3, help="L1 regularization coefficient for gate")
+    parser.add_argument(
+        "--encoder_type",
+        type=str,
+        default="transformer",
+        choices=["transformer", "mlp"],
+        help="Encoder after pathway tokenization; mlp replaces the Transformer block for ablation",
+    )
 
     # Task-similarity aware ProMeta arguments
     parser.add_argument("--tsa_enable", action="store_true", help="Enable task-similarity aware multi-initialization ProMeta")

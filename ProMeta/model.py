@@ -65,6 +65,50 @@ class MetaTransformerLayer(nn.Module):
         x = residual + ff
         return x
 
+
+class MetaMLPEncoder(nn.Module):
+    """Pathway-token MLP encoder with functional parameter passing."""
+    def __init__(self, embed_dim, hidden_dim, dropout=0.4):
+        super().__init__()
+        self.dropout = dropout
+        self.token_linear1 = nn.Linear(embed_dim, hidden_dim)
+        self.token_linear2 = nn.Linear(hidden_dim, embed_dim)
+        self.feature_linear1 = nn.Linear(embed_dim, hidden_dim)
+        self.feature_linear2 = nn.Linear(hidden_dim, embed_dim)
+
+    def functional_forward(self, x, params, prefix):
+        token_hidden = F.linear(
+            x,
+            params[f'{prefix}.token_linear1.weight'],
+            params[f'{prefix}.token_linear1.bias'],
+        )
+        token_hidden = F.gelu(token_hidden)
+        token_hidden = F.dropout(token_hidden, p=self.dropout, training=self.training)
+        token_delta = F.linear(
+            token_hidden,
+            params[f'{prefix}.token_linear2.weight'],
+            params[f'{prefix}.token_linear2.bias'],
+        )
+        token_delta = F.dropout(token_delta, p=self.dropout, training=self.training)
+        token_features = x + token_delta
+
+        pooled = token_features.mean(dim=1)
+        feature_hidden = F.linear(
+            pooled,
+            params[f'{prefix}.feature_linear1.weight'],
+            params[f'{prefix}.feature_linear1.bias'],
+        )
+        feature_hidden = F.gelu(feature_hidden)
+        feature_hidden = F.dropout(feature_hidden, p=self.dropout, training=self.training)
+        feature_delta = F.linear(
+            feature_hidden,
+            params[f'{prefix}.feature_linear2.weight'],
+            params[f'{prefix}.feature_linear2.bias'],
+        )
+        feature_delta = F.dropout(feature_delta, p=self.dropout, training=self.training)
+        return pooled + feature_delta
+
+
 class PathwayGatedTokenizer(nn.Module):
     def __init__(self, num_proteins, embed_dim, pathway_mask, unknown_indices):
         super().__init__()
@@ -128,6 +172,7 @@ class ProphetBioGateModel(nn.Module):
     def __init__(self, num_features, config, pathway_mask=None, unknown_indices=None):
         super().__init__()
         self.config = config
+        self.encoder_type = getattr(config, "encoder_type", "transformer")
         self.tsa_enabled = getattr(config, "tsa_enable", False)
         self.tsa_param_keys = getattr(config, "tsa_param_keys", ["classifier", "tokenizer.gate_logits"])
         self.num_task_groups = getattr(config, "num_task_groups", 1)
@@ -153,12 +198,24 @@ class ProphetBioGateModel(nn.Module):
             pathway_mask=pathway_mask,
             unknown_indices=unknown_indices
         )
-        
-        self.cls_token = nn.Parameter(torch.randn(1, 1, config.embed_dim))
-        self.tf_layers = nn.ModuleList([
-            MetaTransformerLayer(config.embed_dim, config.num_heads, dropout=config.dropout_rate)
-            for _ in range(config.num_layers)
-        ])
+
+        if self.encoder_type == "transformer":
+            self.cls_token = nn.Parameter(torch.randn(1, 1, config.embed_dim))
+            self.tf_layers = nn.ModuleList([
+                MetaTransformerLayer(config.embed_dim, config.num_heads, dropout=config.dropout_rate)
+                for _ in range(config.num_layers)
+            ])
+        elif self.encoder_type == "mlp":
+            self.mlp_encoder = MetaMLPEncoder(
+                config.embed_dim,
+                config.hidden_dim,
+                dropout=config.dropout_rate,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported encoder_type={self.encoder_type!r}. "
+                "Expected 'transformer' or 'mlp'."
+            )
         
         self.classifier = nn.Linear(config.embed_dim, 1)
         self.shortcut_proj = nn.Linear(num_features, config.embed_dim)
@@ -222,17 +279,25 @@ class ProphetBioGateModel(nn.Module):
             B = x.shape[0] 
         
         x_seq, gate_values = self.tokenizer.functional_forward(x_reshaped, params)
-        
-        cls_token = params.get('cls_token', self.cls_token)
-        curr_B = x_seq.shape[0]
-        cls_token_expand = cls_token.expand(curr_B, -1, -1)
-        x_seq = torch.cat((cls_token_expand, x_seq), dim=1)
-        x_seq = F.dropout(x_seq, p=self.config.dropout_rate, training=self.training)
-        
-        for i in range(self.config.num_layers):
-            x_seq = self.tf_layers[i].functional_forward(x_seq, params, prefix=f'tf_layers.{i}')
-        
-        cls_out = x_seq[:, 0, :]
+
+        if self.encoder_type == "transformer":
+            cls_token = params.get('cls_token', self.cls_token)
+            curr_B = x_seq.shape[0]
+            cls_token_expand = cls_token.expand(curr_B, -1, -1)
+            x_seq = torch.cat((cls_token_expand, x_seq), dim=1)
+            x_seq = F.dropout(x_seq, p=self.config.dropout_rate, training=self.training)
+
+            for i in range(self.config.num_layers):
+                x_seq = self.tf_layers[i].functional_forward(x_seq, params, prefix=f'tf_layers.{i}')
+
+            cls_out = x_seq[:, 0, :]
+        else:
+            x_seq = F.dropout(x_seq, p=self.config.dropout_rate, training=self.training)
+            cls_out = self.mlp_encoder.functional_forward(
+                x_seq,
+                params,
+                prefix='mlp_encoder',
+            )
         cls_out = F.dropout(cls_out, p=self.config.dropout_rate, training=self.training)
         
         shortcut = F.linear(x_reshaped, params['shortcut_proj.weight'], params['shortcut_proj.bias'])

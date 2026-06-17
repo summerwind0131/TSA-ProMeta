@@ -152,6 +152,40 @@ For the strict 4-shot comparison use
 - `F_epoch`: one frozen assignment map per epoch.
 - `H_stable`: epoch routing plus 5% switch hysteresis and 5%-50% group bounds.
 
+### ProMeta-MLP encoder ablation
+
+The default encoder remains the original 2-layer Transformer. To replace only
+the middle encoder with the pathway-aware MLP ablation, pass:
+
+```bash
+--encoder_type mlp
+```
+
+This keeps the pathway-gated tokenizer, raw-proteomics shortcut, classifier,
+Meta-SGD, loss, support/query split, and TSA routing logic unchanged. MLP
+checkpoints store architecture metadata and are intentionally incompatible with
+Transformer warmup checkpoints. For TSA-ProMeta-MLP, first train a plain
+ProMeta-MLP warmup checkpoint, then use that MLP checkpoint as
+`--tsa_warmup_checkpoint`.
+
+On Slurm, the 4-shot MLP baseline and TSA-MLP screen are:
+
+```bash
+cd /mnt/hpc/home/lihan/fengyuan/TSA-ProMeta/ProMeta
+sbatch slurm_mlp_baseline_4shot.slurm
+
+# after the baseline checkpoints exist
+sbatch slurm_mlp_tsa_4shot.slurm
+```
+
+Summarize MLP outputs with the same benchmark summarizer. The generated CSVs
+include `encoder_type`, so Transformer and MLP runs remain separate:
+
+```bash
+python summarize_benchmark.py \
+  --output_dir /mnt/hpc/home/lihan/fengyuan/task_prometa_mlp_baseline
+```
+
 ### Diagnose TSA clustering
 
 `ProMeta/analyze_tsa_clustering.py` rebuilds every training disease task vector

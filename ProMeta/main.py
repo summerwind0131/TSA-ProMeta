@@ -284,6 +284,95 @@ def tensors_to_device(values, device):
     return {name: value.detach().to(device) for name, value in values.items()}
 
 
+def get_model_architecture_config(config):
+    return {
+        "encoder_type": getattr(config, "encoder_type", "transformer"),
+        "embed_dim": getattr(config, "embed_dim", None),
+        "hidden_dim": getattr(config, "hidden_dim", None),
+    }
+
+
+def get_checkpoint_state_dict(checkpoint):
+    if isinstance(checkpoint, dict) and "model_state" in checkpoint:
+        return checkpoint["model_state"]
+    if isinstance(checkpoint, dict):
+        return checkpoint
+    return {}
+
+
+def infer_checkpoint_encoder_type(state_dict):
+    keys = list(state_dict.keys())
+    if any(key.startswith("mlp_encoder.") for key in keys):
+        return "mlp"
+    if any(key.startswith("tf_layers.") for key in keys) or "cls_token" in state_dict:
+        return "transformer"
+    return "unknown"
+
+
+def get_checkpoint_architecture_config(checkpoint):
+    if isinstance(checkpoint, dict):
+        model_config = checkpoint.get("model_config") or {}
+        tsa_config = checkpoint.get("tsa_config") or {}
+        encoder_type = (
+            model_config.get("encoder_type")
+            or tsa_config.get("encoder_type")
+        )
+        embed_dim = model_config.get("embed_dim") or tsa_config.get("embed_dim")
+        hidden_dim = model_config.get("hidden_dim") or tsa_config.get("hidden_dim")
+    else:
+        encoder_type = None
+        embed_dim = None
+        hidden_dim = None
+
+    state_dict = get_checkpoint_state_dict(checkpoint)
+    inferred_encoder_type = infer_checkpoint_encoder_type(state_dict)
+    return {
+        "encoder_type": encoder_type or inferred_encoder_type,
+        "embed_dim": embed_dim,
+        "hidden_dim": hidden_dim,
+        "inferred_encoder_type": inferred_encoder_type,
+    }
+
+
+def validate_checkpoint_architecture(model, checkpoint, path):
+    expected = get_model_architecture_config(model.config)
+    observed = get_checkpoint_architecture_config(checkpoint)
+    expected_type = expected["encoder_type"]
+    observed_type = observed["encoder_type"]
+
+    if observed_type != "unknown" and observed_type != expected_type:
+        raise ValueError(
+            f"Checkpoint encoder_type={observed_type} cannot be loaded into "
+            f"encoder_type={expected_type}: {path}. Train a matching ProMeta "
+            "warmup checkpoint first."
+        )
+
+    for key in ("embed_dim", "hidden_dim"):
+        observed_value = observed.get(key)
+        expected_value = expected.get(key)
+        if observed_value is not None and expected_value is not None:
+            if int(observed_value) != int(expected_value):
+                raise ValueError(
+                    f"Checkpoint {key}={observed_value} does not match current "
+                    f"{key}={expected_value}: {path}."
+                )
+
+
+def checkpoint_has_tsa_metadata(checkpoint):
+    if not isinstance(checkpoint, dict):
+        return False
+    return any(
+        key in checkpoint
+        for key in (
+            "tsa_config",
+            "tsa_centroids",
+            "tsa_vector_mean",
+            "tsa_vector_std",
+            "tsa_initial_group_vectors",
+        )
+    )
+
+
 def load_tsa_metadata(model, checkpoint, device):
     for key in (
         "tsa_centroids",
@@ -321,9 +410,10 @@ def load_tsa_metadata(model, checkpoint, device):
 
 def load_model_checkpoint(model, path, device, strict=True, load_metadata=True):
     checkpoint = torch.load(path, map_location=device)
+    validate_checkpoint_architecture(model, checkpoint, path)
     if isinstance(checkpoint, dict) and "model_state" in checkpoint:
         model.load_state_dict(checkpoint["model_state"], strict=strict)
-        if load_metadata:
+        if load_metadata and checkpoint_has_tsa_metadata(checkpoint):
             load_tsa_metadata(model, checkpoint, device)
         return checkpoint
 
@@ -332,11 +422,16 @@ def load_model_checkpoint(model, path, device, strict=True, load_metadata=True):
 
 
 def build_model_checkpoint(model, config, args):
+    model_config = get_model_architecture_config(config)
     if not config.tsa_enable:
-        return model.state_dict()
+        return {
+            "model_state": model.state_dict(),
+            "model_config": model_config,
+        }
 
     return {
         "model_state": model.state_dict(),
+        "model_config": model_config,
         "tsa_centroids": model.tsa_centroids.detach().cpu() if model.tsa_centroids is not None else None,
         "tsa_vector_mean": model.tsa_vector_mean.detach().cpu() if model.tsa_vector_mean is not None else None,
         "tsa_vector_std": model.tsa_vector_std.detach().cpu() if model.tsa_vector_std is not None else None,
@@ -367,6 +462,9 @@ def build_model_checkpoint(model, config, args):
             "tsa_max_group_fraction": config.tsa_max_group_fraction,
             "support_size": args.support_size,
             "max_support_size": args.max_support_size,
+            "encoder_type": model_config["encoder_type"],
+            "embed_dim": model_config["embed_dim"],
+            "hidden_dim": model_config["hidden_dim"],
         },
     }
 
@@ -1088,7 +1186,11 @@ def main():
     set_seed(args.random_seed)
     device = torch.device(f"cuda:{args.gpu_id}" if torch.cuda.is_available() else "cpu")
     mode_name = "TSA-ProMeta" if config.tsa_enable else "ProMeta"
-    print(f"Running {mode_name} on Device: {device} | Config: OutLR={args.outer_lr}, InLR={args.inner_lr}")
+    print(
+        f"Running {mode_name} on Device: {device} | "
+        f"Encoder={config.encoder_type} | "
+        f"Config: OutLR={args.outer_lr}, InLR={args.inner_lr}"
+    )
 
     p_data_df = pd.read_csv(args.proteomics_csv)
     p_data_df["EID"] = p_data_df["EID"].apply(lambda x: str(x).strip().replace(".0", ""))
@@ -1184,6 +1286,7 @@ def main():
         "epoch1_test_metrics": None,
         "best_epoch": None,
         "early_stopped_epoch": None,
+        "encoder_type": config.encoder_type,
     }
     if config.tsa_enable:
         history["tsa_cluster_counts"] = model.tsa_cluster_counts

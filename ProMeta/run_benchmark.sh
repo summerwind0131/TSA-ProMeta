@@ -17,6 +17,7 @@ INNER_LR="${INNER_LR:-0.005}"
 EPOCHS="${EPOCHS:-100}"
 PATIENCE="${PATIENCE:-10}"
 MAX_SUPPORT_SIZE="${MAX_SUPPORT_SIZE:-32}"
+ENCODER_TYPE="${ENCODER_TYPE:-transformer}"
 NUM_TASK_GROUPS="${NUM_TASK_GROUPS:-5}"
 TSA_SELECTOR_STEPS="${TSA_SELECTOR_STEPS:-10}"
 TSA_PARAM_KEYS="${TSA_PARAM_KEYS:-classifier,tokenizer.gate_logits}"
@@ -53,6 +54,7 @@ for shot in $SHOT_LIST; do
       --inner_lr "$INNER_LR" \
       --epochs "$EPOCHS" \
       --patience "$PATIENCE" \
+      --encoder_type "$ENCODER_TYPE" \
       --experiment_name "$EXPERIMENT_NAME"
 
     warmup_checkpoint="$OUTPUT_DIR/checkpoints/support_${shot}/ProMeta_best_seed${seed}.pth"
@@ -76,6 +78,7 @@ for shot in $SHOT_LIST; do
       --inner_lr "$INNER_LR" \
       --epochs "$EPOCHS" \
       --patience "$PATIENCE" \
+      --encoder_type "$ENCODER_TYPE" \
       --experiment_name "$EXPERIMENT_NAME" \
       --tsa_enable \
       --num_task_groups "$NUM_TASK_GROUPS" \

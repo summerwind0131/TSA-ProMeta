@@ -61,6 +61,7 @@ def load_json_results(benchmark_dir):
         seed = as_int(data.get("seed", config.get("random_seed")))
         timestamp = data.get("timestamp", "")
         experiment_name = data.get("experiment_name", config.get("experiment_name", "ProMeta"))
+        encoder_type = data.get("encoder_type", config.get("encoder_type", "transformer"))
         selector_source = config.get("tsa_selector_source")
         assignment_source = config.get("tsa_assignment_source")
         distance_mode = config.get("tsa_distance_mode")
@@ -75,6 +76,7 @@ def load_json_results(benchmark_dir):
             "json_path": str(path),
             "timestamp": timestamp,
             "experiment_name": experiment_name,
+            "encoder_type": encoder_type,
             "model": model,
             "support_size": support_size,
             "max_support_size": max_support_size,
@@ -118,6 +120,7 @@ def keep_latest_runs(run_df, task_df):
         "seed",
         "model",
         "experiment_name",
+        "encoder_type",
         *TSA_CONFIG_COLUMNS,
     ]
     sort_cols = [*identity_cols, "timestamp", "json_path"]
@@ -211,7 +214,7 @@ def build_summary(task_df, iterations, seed):
         return pd.DataFrame(columns=["support_size", "model", "seed_count", "task_count", "disease_count"])
 
     rows = []
-    group_cols = ["support_size", "model", "experiment_name", *TSA_CONFIG_COLUMNS]
+    group_cols = ["support_size", "model", "experiment_name", "encoder_type", *TSA_CONFIG_COLUMNS]
     for group_key, group in task_df.groupby(group_cols, dropna=False):
         group_values = dict(zip(group_cols, group_key))
         row = {
@@ -244,7 +247,7 @@ def build_paired_delta(task_df):
     base_cols = keys + [m for m in METRICS if m in base.columns]
     tsa_cols = (
         keys
-        + [col for col in ["experiment_name", *TSA_CONFIG_COLUMNS] if col in tsa.columns]
+        + [col for col in ["experiment_name", "encoder_type", *TSA_CONFIG_COLUMNS] if col in tsa.columns]
         + [m for m in METRICS if m in tsa.columns]
         + ["tsa_group", "tsa_distance", "tsa_margin"]
     )
@@ -278,7 +281,7 @@ def build_stat_tests(paired_df, iterations, seed):
 
         group_cols = [
             "support_size",
-            *[col for col in ["experiment_name", *TSA_CONFIG_COLUMNS] if col in paired_df.columns],
+            *[col for col in ["experiment_name", "encoder_type", *TSA_CONFIG_COLUMNS] if col in paired_df.columns],
         ]
         for group_key, group in paired_df.groupby(group_cols, dropna=False):
             if not isinstance(group_key, tuple):
@@ -309,7 +312,12 @@ def build_stat_tests(paired_df, iterations, seed):
     for metric, group in tests.groupby("metric"):
         adjusted = holm_adjust(group["wilcoxon_p"].to_numpy(dtype=float))
         tests.loc[group.index, "holm_p"] = adjusted
-    return tests.sort_values(["metric", "support_size", "experiment_name"])
+    sort_cols = [
+        col
+        for col in ["metric", "support_size", "experiment_name", "encoder_type"]
+        if col in tests.columns
+    ]
+    return tests.sort_values(sort_cols)
 
 
 def plot_metric_curve(task_df, metric, output_path, iterations, seed):
